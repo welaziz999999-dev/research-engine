@@ -1,0 +1,117 @@
+name: PRS provider qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prs-provider-qualification
+  cancel-in-progress: false
+
+env:
+  QUALIFICATION_SHA: b45103d46a6ba90cc9508e99b569c9e4b488a009
+
+jobs:
+  selected-surface:
+    name: selected-surface-py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - name: Checkout exact evaluated baseline
+        uses: actions/checkout@v4
+        with:
+          ref: b45103d46a6ba90cc9508e99b569c9e4b488a009
+          fetch-depth: 1
+
+      - name: Verify exact baseline identity
+        shell: bash
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "Expected: $QUALIFICATION_SHA"
+          echo "Actual:   $actual"
+          test "$actual" = "$QUALIFICATION_SHA"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install selected qualification surface
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,report]"
+
+      - name: Ruff
+        run: python -m ruff check src tests examples
+
+      - name: Full test suite
+        run: python -m pytest -q
+
+      - name: Doctor command smoke
+        if: matrix.python-version == '3.12'
+        shell: bash
+        run: |
+          set +e
+          research-engine doctor --format json --no-write > /tmp/research-engine-doctor.json
+          status=$?
+          set -e
+          cat /tmp/research-engine-doctor.json
+          python -m json.tool /tmp/research-engine-doctor.json > /dev/null
+          test "$status" -eq 0 -o "$status" -eq 1
+
+      - name: Bounded offline dry-run smoke
+        if: matrix.python-version == '3.12'
+        run: |
+          research-engine run "PRS qualification smoke" \
+            --pack auto \
+            --search-provider none \
+            --browser-auth never \
+            --dry-run \
+            --output /tmp/prs-qualification-runs \
+            > /tmp/research-engine-smoke.json
+          cat /tmp/research-engine-smoke.json
+          python -m json.tool /tmp/research-engine-smoke.json > /dev/null
+
+  core-only-smoke:
+    name: core-only-smoke-py3.10
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout exact evaluated baseline
+        uses: actions/checkout@v4
+        with:
+          ref: b45103d46a6ba90cc9508e99b569c9e4b488a009
+          fetch-depth: 1
+
+      - name: Verify exact baseline identity
+        shell: bash
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "Expected: $QUALIFICATION_SHA"
+          echo "Actual:   $actual"
+          test "$actual" = "$QUALIFICATION_SHA"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install core and development dependencies without report extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Verify core-only summary and optional-report contract
+        run: >-
+          python -m pytest -q
+          tests/test_packaging.py::test_core_metadata_keeps_report_renderer_optional
+          tests/test_report_mode.py::test_summary_mode_does_not_import_reportlab
+          tests/test_report_mode.py::test_full_mode_missing_report_extra_has_actionable_error
+          tests/test_report_mode.py::test_cli_full_mode_missing_report_extra_is_concise
+          tests/test_artifact_contract.py
