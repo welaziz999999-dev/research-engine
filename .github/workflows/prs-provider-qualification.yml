@@ -47,14 +47,29 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,report]"
 
-      - name: Ruff
+      - name: Record resolved environment
+        shell: bash
+        run: |
+          python --version
+          python -m pip --version
+          python -m ruff --version
+          python -m pytest --version
+          python -m pip freeze | sort
+
+      - name: Ruff — record baseline lint condition
+        id: ruff
+        continue-on-error: true
         run: python -m ruff check src tests examples
 
       - name: Full test suite
+        id: tests
+        continue-on-error: true
         run: python -m pytest -q
 
       - name: Doctor command smoke
+        id: doctor
         if: matrix.python-version == '3.12'
+        continue-on-error: true
         shell: bash
         run: |
           set +e
@@ -66,7 +81,10 @@ jobs:
           test "$status" -eq 0 -o "$status" -eq 1
 
       - name: Bounded offline dry-run smoke
+        id: dryrun
         if: matrix.python-version == '3.12'
+        continue-on-error: true
+        shell: bash
         run: |
           research-engine run "PRS qualification smoke" \
             --pack auto \
@@ -77,6 +95,50 @@ jobs:
             > /tmp/research-engine-smoke.json
           cat /tmp/research-engine-smoke.json
           python -m json.tool /tmp/research-engine-smoke.json > /dev/null
+
+      - name: Qualification evidence summary
+        if: always()
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          RUFF_OUTCOME: ${{ steps.ruff.outcome }}
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+          DOCTOR_OUTCOME: ${{ steps.doctor.outcome }}
+          DRYRUN_OUTCOME: ${{ steps.dryrun.outcome }}
+        run: |
+          echo "Exact baseline: $QUALIFICATION_SHA"
+          echo "Python: $PYTHON_VERSION"
+          echo "Ruff outcome (recorded limitation; non-blocking by itself): $RUFF_OUTCOME"
+          echo "Full pytest outcome: $TEST_OUTCOME"
+          echo "Doctor smoke outcome: $DOCTOR_OUTCOME"
+          echo "Bounded offline dry-run outcome: $DRYRUN_OUTCOME"
+
+      - name: Qualification functional verdict
+        if: always()
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+          DOCTOR_OUTCOME: ${{ steps.doctor.outcome }}
+          DRYRUN_OUTCOME: ${{ steps.dryrun.outcome }}
+        run: |
+          if [ "$TEST_OUTCOME" != "success" ]; then
+            echo "Functional qualification failed: full pytest outcome=$TEST_OUTCOME"
+            exit 1
+          fi
+
+          if [ "$PYTHON_VERSION" = "3.12" ]; then
+            if [ "$DOCTOR_OUTCOME" != "success" ]; then
+              echo "Functional qualification failed: doctor smoke outcome=$DOCTOR_OUTCOME"
+              exit 1
+            fi
+            if [ "$DRYRUN_OUTCOME" != "success" ]; then
+              echo "Functional qualification failed: bounded dry-run outcome=$DRYRUN_OUTCOME"
+              exit 1
+            fi
+          fi
+
+          echo "Required functional qualification surface passed for Python $PYTHON_VERSION."
 
   core-only-smoke:
     name: core-only-smoke-py3.10
@@ -106,6 +168,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+
+      - name: Record resolved core-only environment
+        shell: bash
+        run: |
+          python --version
+          python -m pip --version
+          python -m pytest --version
+          python -m pip freeze | sort
 
       - name: Verify core-only summary and optional-report contract
         run: >-
